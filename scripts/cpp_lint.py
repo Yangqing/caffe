@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright (c) 2009 Google Inc. All rights reserved.
 #
@@ -52,6 +52,10 @@ import string
 import sys
 import unicodedata
 
+import six
+
+from six import iteritems, itervalues
+from six.moves import xrange
 
 _USAGE = """
 Syntax: cpp_lint.py [--verbose=#] [--output=vs7] [--filter=-x,+y,...]
@@ -154,6 +158,8 @@ _ERROR_CATEGORIES = [
   'build/namespaces',
   'build/printf_format',
   'build/storage_class',
+  'caffe/alt_fn',
+  'caffe/data_layer_setup',
   'caffe/random_fn',
   'legal/copyright',
   'readability/alt_tokens',
@@ -205,12 +211,11 @@ _ERROR_CATEGORIES = [
   'whitespace/todo'
   ]
 
-# The default state of the category filter. This is overrided by the --filter=
+# The default state of the category filter. This is overridden by the --filter=
 # flag. By default all errors are on, so only add here categories that should be
 # off by default (i.e., categories that must be enabled by the --filter= flags).
 # All entries here should start with a '-' or '+', as in the --filter= flag.
 _DEFAULT_FILTERS = [
-  '-build/include_alpha',
   '-build/include_dir',
   '-readability/todo',
   ]
@@ -446,7 +451,7 @@ _RE_SUPPRESSION = re.compile(r'\bNOLINT(_NEXT_LINE)?\b(\([^)]*\))?')
 _error_suppressions = {}
 
 # Finds Copyright.
-_RE_COPYRIGHT = re.compile(r'Copyright \d\d\d\d BVLC and contributors.')
+_RE_COPYRIGHT = re.compile(r'Copyright')
 
 # The root directory used for deriving header guard CPP variable.
 # This is set by --root flag.
@@ -755,7 +760,7 @@ class _CppLintState(object):
 
   def PrintErrorCounts(self):
     """Print a summary of errors by category, and the total."""
-    for category, count in self.errors_by_category.iteritems():
+    for category, count in iteritems(self.errors_by_category):
       sys.stderr.write('Category \'%s\' errors found: %d\n' %
                        (category, count))
     sys.stderr.write('Total errors found: %d\n' % self.error_count)
@@ -1369,16 +1374,15 @@ def ReverseCloseExpression(clean_lines, linenum, pos):
 
 
 def CheckForCopyright(filename, lines, error):
-  """Logs an error if no Copyright message appears at the top of the file."""
+  """Logs an error if a Copyright message appears at the top of the file."""
 
-  # We'll say it should occur by line 10. Don't forget there's a
+  # We'll check up to line 10. Don't forget there's a
   # dummy line at the front.
   for line in xrange(1, min(len(lines), 11)):
-    if _RE_COPYRIGHT.search(lines[line], re.I): break
-  else:                       # means no copyright line was found
-    error(filename, 0, 'legal/copyright', 5,
-          'BVLC copyright message not found.  '
-          'You should have a line: "Copyright [year] BVLC and contributors."')
+    if _RE_COPYRIGHT.search(lines[line], re.I):
+      error(filename, 0, 'legal/copyright', 5,
+            'Copyright message found.  '
+            'You should not include a copyright line.')
 
 
 def GetHeaderGuardCPPVariable(filename):
@@ -1559,6 +1563,76 @@ def CheckForMultilineCommentsAndStrings(filename, clean_lines, linenum, error):
           'Multi-line string ("...") found.  This lint script doesn\'t '
           'do well with such strings, and may give bogus warnings.  '
           'Use C++11 raw strings or concatenation instead.')
+
+
+caffe_alt_function_list = (
+    ('memset', ['caffe_set', 'caffe_memset']),
+    ('cudaMemset', ['caffe_gpu_set', 'caffe_gpu_memset']),
+    ('memcpy', ['caffe_copy']),
+    ('cudaMemcpy', ['caffe_copy', 'caffe_gpu_memcpy']),
+    )
+
+
+def CheckCaffeAlternatives(filename, clean_lines, linenum, error):
+  """Checks for C(++) functions for which a Caffe substitute should be used.
+
+  For certain native C functions (memset, memcpy), there is a Caffe alternative
+  which should be used instead.
+
+  Args:
+    filename: The name of the current file.
+    clean_lines: A CleansedLines instance containing the file.
+    linenum: The number of the line to check.
+    error: The function to call with any errors found.
+  """
+  line = clean_lines.elided[linenum]
+  for function, alts in caffe_alt_function_list:
+    ix = line.find(function + '(')
+    if ix >= 0 and (ix == 0 or (not line[ix - 1].isalnum() and
+                                line[ix - 1] not in ('_', '.', '>'))):
+      disp_alts = ['%s(...)' % alt for alt in alts]
+      error(filename, linenum, 'caffe/alt_fn', 2,
+            'Use Caffe function %s instead of %s(...).' %
+                (' or '.join(disp_alts), function))
+
+
+def CheckCaffeDataLayerSetUp(filename, clean_lines, linenum, error):
+  """Except the base classes, Caffe DataLayer should define DataLayerSetUp
+     instead of LayerSetUp.
+     
+  The base DataLayers define common SetUp steps, the subclasses should
+  not override them.
+  
+  Args:
+    filename: The name of the current file.
+    clean_lines: A CleansedLines instance containing the file.
+    linenum: The number of the line to check.
+    error: The function to call with any errors found.
+  """
+  line = clean_lines.elided[linenum]
+  ix = line.find('DataLayer<Dtype>::LayerSetUp')
+  if ix >= 0 and (
+       line.find('void DataLayer<Dtype>::LayerSetUp') != -1 or
+       line.find('void ImageDataLayer<Dtype>::LayerSetUp') != -1 or
+       line.find('void MemoryDataLayer<Dtype>::LayerSetUp') != -1 or
+       line.find('void WindowDataLayer<Dtype>::LayerSetUp') != -1):
+      error(filename, linenum, 'caffe/data_layer_setup', 2,
+            'Except the base classes, Caffe DataLayer should define'
+            + ' DataLayerSetUp instead of LayerSetUp. The base DataLayers'
+            + ' define common SetUp steps, the subclasses should'
+            + ' not override them.')
+  ix = line.find('DataLayer<Dtype>::DataLayerSetUp')
+  if ix >= 0 and (
+       line.find('void Base') == -1 and
+       line.find('void DataLayer<Dtype>::DataLayerSetUp') == -1 and
+       line.find('void ImageDataLayer<Dtype>::DataLayerSetUp') == -1 and
+       line.find('void MemoryDataLayer<Dtype>::DataLayerSetUp') == -1 and
+       line.find('void WindowDataLayer<Dtype>::DataLayerSetUp') == -1):
+      error(filename, linenum, 'caffe/data_layer_setup', 2,
+            'Except the base classes, Caffe DataLayer should define'
+            + ' DataLayerSetUp instead of LayerSetUp. The base DataLayers'
+            + ' define common SetUp steps, the subclasses should'
+            + ' not override them.')
 
 
 c_random_function_list = (
@@ -3374,16 +3448,16 @@ def GetLineWidth(line):
     The width of the line in column positions, accounting for Unicode
     combining characters and wide characters.
   """
-  if isinstance(line, unicode):
-    width = 0
-    for uc in unicodedata.normalize('NFC', line):
-      if unicodedata.east_asian_width(uc) in ('W', 'F'):
-        width += 2
-      elif not unicodedata.combining(uc):
-        width += 1
-    return width
-  else:
-    return len(line)
+  if six.PY2:
+    if isinstance(line, unicode):
+      width = 0
+      for uc in unicodedata.normalize('NFC', line):
+        if unicodedata.east_asian_width(uc) in ('W', 'F'):
+          width += 2
+        elif not unicodedata.combining(uc):
+          width += 1
+      return width
+  return len(line)
 
 
 def CheckStyle(filename, clean_lines, linenum, file_extension, nesting_state,
@@ -3704,7 +3778,7 @@ def _GetTextInside(text, start_pattern):
 
   # Give opening punctuations to get the matching close-punctuations.
   matching_punctuation = {'(': ')', '{': '}', '[': ']'}
-  closing_punctuation = set(matching_punctuation.itervalues())
+  closing_punctuation = set(itervalues(matching_punctuation))
 
   # Find the position to start extracting text.
   match = re.search(start_pattern, text, re.M)
@@ -4390,7 +4464,7 @@ def UpdateIncludeState(filename, include_state, io=codecs):
     io: The io factory to use to read the file. Provided for testability.
 
   Returns:
-    True if a header was succesfully added. False otherwise.
+    True if a header was successfully added. False otherwise.
   """
   headerfile = None
   try:
@@ -4462,7 +4536,7 @@ def CheckForIncludeWhatYouUse(filename, clean_lines, include_state, error,
   # Let's copy the include_state so it is only messed up within this function.
   include_state = include_state.copy()
 
-  # Did we find the header for this file (if any) and succesfully load it?
+  # Did we find the header for this file (if any) and successfully load it?
   header_found = False
 
   # Use the absolute path so that matching works properly.
@@ -4562,6 +4636,8 @@ def ProcessLine(filename, file_extension, clean_lines, line,
   CheckForNonStandardConstructs(filename, clean_lines, line,
                                 nesting_state, error)
   CheckVlogArguments(filename, clean_lines, line, error)
+  CheckCaffeAlternatives(filename, clean_lines, line, error)
+  CheckCaffeDataLayerSetUp(filename, clean_lines, line, error)
   CheckCaffeRandom(filename, clean_lines, line, error)
   CheckPosixThreading(filename, clean_lines, line, error)
   CheckInvalidIncrement(filename, clean_lines, line, error)
@@ -4761,7 +4837,7 @@ def ParseArguments(args):
       try:
           _valid_extensions = set(val.split(','))
       except ValueError:
-          PrintUsage('Extensions must be comma seperated list.')
+          PrintUsage('Extensions must be comma separated list.')
 
   if not filenames:
     PrintUsage('No files were specified.')
@@ -4779,10 +4855,11 @@ def main():
 
   # Change stderr to write with replacement characters so we don't die
   # if we try to print something containing non-ASCII characters.
-  sys.stderr = codecs.StreamReaderWriter(sys.stderr,
-                                         codecs.getreader('utf8'),
-                                         codecs.getwriter('utf8'),
-                                         'replace')
+  if six.PY2:
+    sys.stderr = codecs.StreamReaderWriter(sys.stderr,
+                                          codecs.getreader('utf8'),
+                                          codecs.getwriter('utf8'),
+                                          'replace')
 
   _cpplint_state.ResetErrorCounts()
   for filename in filenames:

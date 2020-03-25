@@ -1,39 +1,44 @@
-// Copyright 2014 BVLC and contributors.
-
 #include <vector>
 
-#include "caffe/layer.hpp"
-#include "caffe/vision_layers.hpp"
-#include "caffe/util/math_functions.hpp"
+#include "caffe/layers/flatten_layer.hpp"
 
 namespace caffe {
 
 template <typename Dtype>
-void FlattenLayer<Dtype>::SetUp(const vector<Blob<Dtype>*>& bottom,
-      vector<Blob<Dtype>*>* top) {
-  CHECK_EQ(bottom.size(), 1) << "Flatten Layer takes a single blob as input.";
-  CHECK_EQ(top->size(), 1) << "Flatten Layer takes a single blob as output.";
-  int channels_out = bottom[0]->channels() * bottom[0]->height()
-      * bottom[0]->width();
-  (*top)[0]->Reshape(bottom[0]->num(), channels_out, 1, 1);
-  count_ = bottom[0]->num() * channels_out;
-  CHECK_EQ(count_, bottom[0]->count());
-  CHECK_EQ(count_, (*top)[0]->count());
+void FlattenLayer<Dtype>::Reshape(const vector<Blob<Dtype>*>& bottom,
+      const vector<Blob<Dtype>*>& top) {
+  CHECK_NE(top[0], bottom[0]) << this->type() << " Layer does not "
+      "allow in-place computation.";
+  const int start_axis = bottom[0]->CanonicalAxisIndex(
+      this->layer_param_.flatten_param().axis());
+  const int end_axis = bottom[0]->CanonicalAxisIndex(
+      this->layer_param_.flatten_param().end_axis());
+  vector<int> top_shape;
+  for (int i = 0; i < start_axis; ++i) {
+    top_shape.push_back(bottom[0]->shape(i));
+  }
+  const int flattened_dim = bottom[0]->count(start_axis, end_axis + 1);
+  top_shape.push_back(flattened_dim);
+  for (int i = end_axis + 1; i < bottom[0]->num_axes(); ++i) {
+    top_shape.push_back(bottom[0]->shape(i));
+  }
+  top[0]->Reshape(top_shape);
+  CHECK_EQ(top[0]->count(), bottom[0]->count());
 }
 
 template <typename Dtype>
-Dtype FlattenLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
-      vector<Blob<Dtype>*>* top) {
-  (*top)[0]->ShareData(*bottom[0]);
-  return Dtype(0.);
+void FlattenLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
+      const vector<Blob<Dtype>*>& top) {
+  top[0]->ShareData(*bottom[0]);
 }
 
 template <typename Dtype>
 void FlattenLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
-      const bool propagate_down, vector<Blob<Dtype>*>* bottom) {
-  (*bottom)[0]->ShareDiff(*top[0]);
+      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+  bottom[0]->ShareDiff(*top[0]);
 }
 
 INSTANTIATE_CLASS(FlattenLayer);
+REGISTER_LAYER_CLASS(Flatten);
 
 }  // namespace caffe

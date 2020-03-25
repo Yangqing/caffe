@@ -1,19 +1,18 @@
-// Copyright 2014 BVLC and contributors.
-
-#include <cstring>
 #include <string>
 #include <vector>
 
-#include "cuda_runtime.h"
+#include "boost/scoped_ptr.hpp"
 #include "google/protobuf/text_format.h"
 #include "gtest/gtest.h"
+
 #include "caffe/blob.hpp"
 #include "caffe/common.hpp"
+#include "caffe/layer.hpp"
+#include "caffe/util/db.hpp"
+#include "caffe/util/io.hpp"
 #include "caffe/util/upgrade_proto.hpp"
 
 #include "caffe/test/test_caffe_main.hpp"
-
-using std::string;
 
 namespace caffe {
 
@@ -1087,7 +1086,7 @@ TEST_F(PaddingLayerUpgradeTest, TestImageNet) {
   this->RunPaddingUpgradeTest(input_proto, expected_output_proto);
 }
 
-class V0UpgradeTest : public ::testing::Test {
+class NetUpgradeTest : public ::testing::Test {
  protected:
   void RunV0UpgradeTest(
       const string& input_param_string, const string& output_param_string) {
@@ -1105,10 +1104,27 @@ class V0UpgradeTest : public ::testing::Test {
     EXPECT_EQ(expected_output_param.DebugString(),
         actual_output_param.DebugString());
   }
+
+  void RunV1UpgradeTest(
+      const string& input_param_string, const string& output_param_string) {
+    // Test that UpgradeV0Net called on the NetParameter proto specified by
+    // input_param_string results in the NetParameter proto specified by
+    // output_param_string.
+    NetParameter input_param;
+    CHECK(google::protobuf::TextFormat::ParseFromString(
+        input_param_string, &input_param));
+    NetParameter expected_output_param;
+    CHECK(google::protobuf::TextFormat::ParseFromString(
+        output_param_string, &expected_output_param));
+    NetParameter actual_output_param;
+    UpgradeV1Net(input_param, &actual_output_param);
+    EXPECT_EQ(expected_output_param.DebugString(),
+        actual_output_param.DebugString());
+  }
 };
 
-TEST_F(V0UpgradeTest, TestSimple) {
-  const string& input_proto =
+TEST_F(NetUpgradeTest, TestSimple) {
+  const string& v0_proto =
       "name: 'CaffeNet' "
       "layers { "
       "  layer { "
@@ -1184,17 +1200,19 @@ TEST_F(V0UpgradeTest, TestSimple) {
       "  bottom: 'fc8' "
       "  bottom: 'label' "
       "} ";
-  const string& expected_output_proto =
+  const string& expected_v1_proto =
       "name: 'CaffeNet' "
       "layers { "
       "  name: 'data' "
       "  type: DATA "
       "  data_param { "
       "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
-      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "    batch_size: 256 "
+      "  } "
+      "  transform_param { "
       "    crop_size: 227 "
       "    mirror: true "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "  } "
       "  top: 'data' "
       "  top: 'label' "
@@ -1250,11 +1268,89 @@ TEST_F(V0UpgradeTest, TestSimple) {
       "  bottom: 'fc8' "
       "  bottom: 'label' "
       "} ";
-  this->RunV0UpgradeTest(input_proto, expected_output_proto);
+  this->RunV0UpgradeTest(v0_proto, expected_v1_proto);
+
+  const string& expected_v2_proto =
+      "name: 'CaffeNet' "
+      "layer { "
+      "  name: 'data' "
+      "  type: 'Data' "
+      "  data_param { "
+      "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
+      "    batch_size: 256 "
+      "  } "
+      "  transform_param { "
+      "    crop_size: 227 "
+      "    mirror: true "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
+      "  } "
+      "  top: 'data' "
+      "  top: 'label' "
+      "} "
+      "layer { "
+      "  name: 'conv1' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 96 "
+      "    kernel_size: 11 "
+      "    stride: 4 "
+      "    pad: 2 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 0. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'data' "
+      "  top: 'conv1' "
+      "} "
+      "layer { "
+      "  name: 'fc8' "
+      "  type: 'InnerProduct' "
+      "  inner_product_param { "
+      "    num_output: 1000 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 0 "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'conv1' "
+      "  top: 'fc8' "
+      "} "
+      "layer { "
+      "  name: 'loss' "
+      "  type: 'SoftmaxWithLoss' "
+      "  bottom: 'fc8' "
+      "  bottom: 'label' "
+      "} ";
+  this->RunV1UpgradeTest(expected_v1_proto, expected_v2_proto);
 }
 
 // Test any layer or parameter upgrades not covered by other tests.
-TEST_F(V0UpgradeTest, TestAllParams) {
+TEST_F(NetUpgradeTest, TestAllParams) {
   const string& input_proto =
       "name: 'CaffeNet' "
       "input: 'input_data' "
@@ -1525,12 +1621,14 @@ TEST_F(V0UpgradeTest, TestAllParams) {
       "  type: DATA "
       "  data_param { "
       "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
-      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "    batch_size: 256 "
+      "    rand_skip: 73 "
+      "  } "
+      "  transform_param { "
       "    crop_size: 227 "
       "    mirror: true "
       "    scale: 0.25 "
-      "    rand_skip: 73 "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "  } "
       "  top: 'data' "
       "  top: 'label' "
@@ -1540,15 +1638,17 @@ TEST_F(V0UpgradeTest, TestAllParams) {
       "  type: IMAGE_DATA "
       "  image_data_param { "
       "    source: '/home/jiayq/Data/ILSVRC12/train-images' "
-      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "    batch_size: 256 "
-      "    crop_size: 227 "
-      "    mirror: true "
-      "    scale: 0.25 "
       "    rand_skip: 73 "
       "    shuffle: true "
       "    new_height: 40 "
       "    new_width: 30 "
+      "  } "
+      "  transform_param {"
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
+      "    crop_size: 227 "
+      "    mirror: true "
+      "    scale: 0.25 "
       "  } "
       "  top: 'images_data' "
       "  top: 'images_label' "
@@ -1558,16 +1658,18 @@ TEST_F(V0UpgradeTest, TestAllParams) {
       "  type: WINDOW_DATA "
       "  window_data_param { "
       "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
-      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "    batch_size: 256 "
-      "    crop_size: 227 "
-      "    mirror: true "
       "    fg_threshold: 0.25 "
       "    bg_threshold: 0.75 "
       "    fg_fraction: 0.5 "
       "    context_pad: 16 "
       "    crop_mode: 'square' "
       "  } "
+      "  transform_param { "
+      "    mirror: true "
+      "    crop_size: 227 "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
+      "  }"
       "  top: 'window_data' "
       "  top: 'window_label' "
       "} "
@@ -1748,8 +1850,8 @@ TEST_F(V0UpgradeTest, TestAllParams) {
   this->RunV0UpgradeTest(input_proto, expected_output_proto);
 }
 
-TEST_F(V0UpgradeTest, TestImageNet) {
-  const string& input_proto =
+TEST_F(NetUpgradeTest, TestImageNet) {
+  const string& v0_proto =
       "name: 'CaffeNet' "
       "layers { "
       "  layer { "
@@ -2114,17 +2216,19 @@ TEST_F(V0UpgradeTest, TestImageNet) {
       "  bottom: 'fc8' "
       "  bottom: 'label' "
       "} ";
-  const string& expected_output_proto =
+  const string& expected_v1_proto =
       "name: 'CaffeNet' "
       "layers { "
       "  name: 'data' "
       "  type: DATA "
       "  data_param { "
       "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
-      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "    batch_size: 256 "
+      "  } "
+      "  transform_param { "
       "    crop_size: 227 "
       "    mirror: true "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
       "  } "
       "  top: 'data' "
       "  top: 'label' "
@@ -2431,7 +2535,459 @@ TEST_F(V0UpgradeTest, TestImageNet) {
       "  bottom: 'fc8' "
       "  bottom: 'label' "
       "} ";
-  this->RunV0UpgradeTest(input_proto, expected_output_proto);
+  this->RunV0UpgradeTest(v0_proto, expected_v1_proto);
+
+  const string& expected_v2_proto =
+      "name: 'CaffeNet' "
+      "layer { "
+      "  name: 'data' "
+      "  type: 'Data' "
+      "  data_param { "
+      "    source: '/home/jiayq/Data/ILSVRC12/train-leveldb' "
+      "    batch_size: 256 "
+      "  } "
+      "  transform_param { "
+      "    crop_size: 227 "
+      "    mirror: true "
+      "    mean_file: '/home/jiayq/Data/ILSVRC12/image_mean.binaryproto' "
+      "  } "
+      "  top: 'data' "
+      "  top: 'label' "
+      "} "
+      "layer { "
+      "  name: 'conv1' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 96 "
+      "    kernel_size: 11 "
+      "    stride: 4 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 0. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'data' "
+      "  top: 'conv1' "
+      "} "
+      "layer { "
+      "  name: 'relu1' "
+      "  type: 'ReLU' "
+      "  bottom: 'conv1' "
+      "  top: 'conv1' "
+      "} "
+      "layer { "
+      "  name: 'pool1' "
+      "  type: 'Pooling' "
+      "  pooling_param { "
+      "    pool: MAX "
+      "    kernel_size: 3 "
+      "    stride: 2 "
+      "  } "
+      "  bottom: 'conv1' "
+      "  top: 'pool1' "
+      "} "
+      "layer { "
+      "  name: 'norm1' "
+      "  type: 'LRN' "
+      "  lrn_param { "
+      "    local_size: 5 "
+      "    alpha: 0.0001 "
+      "    beta: 0.75 "
+      "  } "
+      "  bottom: 'pool1' "
+      "  top: 'norm1' "
+      "} "
+      "layer { "
+      "  name: 'conv2' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 256 "
+      "    group: 2 "
+      "    kernel_size: 5 "
+      "    pad: 2 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 1. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'norm1' "
+      "  top: 'conv2' "
+      "} "
+      "layer { "
+      "  name: 'relu2' "
+      "  type: 'ReLU' "
+      "  bottom: 'conv2' "
+      "  top: 'conv2' "
+      "} "
+      "layer { "
+      "  name: 'pool2' "
+      "  type: 'Pooling' "
+      "  pooling_param { "
+      "    pool: MAX "
+      "    kernel_size: 3 "
+      "    stride: 2 "
+      "  } "
+      "  bottom: 'conv2' "
+      "  top: 'pool2' "
+      "} "
+      "layer { "
+      "  name: 'norm2' "
+      "  type: 'LRN' "
+      "  lrn_param { "
+      "    local_size: 5 "
+      "    alpha: 0.0001 "
+      "    beta: 0.75 "
+      "  } "
+      "  bottom: 'pool2' "
+      "  top: 'norm2' "
+      "} "
+      "layer { "
+      "  name: 'conv3' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 384 "
+      "    kernel_size: 3 "
+      "    pad: 1 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 0. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'norm2' "
+      "  top: 'conv3' "
+      "} "
+      "layer { "
+      "  name: 'relu3' "
+      "  type: 'ReLU' "
+      "  bottom: 'conv3' "
+      "  top: 'conv3' "
+      "} "
+      "layer { "
+      "  name: 'conv4' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 384 "
+      "    group: 2 "
+      "    kernel_size: 3 "
+      "    pad: 1 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 1. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'conv3' "
+      "  top: 'conv4' "
+      "} "
+      "layer { "
+      "  name: 'relu4' "
+      "  type: 'ReLU' "
+      "  bottom: 'conv4' "
+      "  top: 'conv4' "
+      "} "
+      "layer { "
+      "  name: 'conv5' "
+      "  type: 'Convolution' "
+      "  convolution_param { "
+      "    num_output: 256 "
+      "    group: 2 "
+      "    kernel_size: 3 "
+      "    pad: 1 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 1. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'conv4' "
+      "  top: 'conv5' "
+      "} "
+      "layer { "
+      "  name: 'relu5' "
+      "  type: 'ReLU' "
+      "  bottom: 'conv5' "
+      "  top: 'conv5' "
+      "} "
+      "layer { "
+      "  name: 'pool5' "
+      "  type: 'Pooling' "
+      "  pooling_param { "
+      "    kernel_size: 3 "
+      "    pool: MAX "
+      "    stride: 2 "
+      "  } "
+      "  bottom: 'conv5' "
+      "  top: 'pool5' "
+      "} "
+      "layer { "
+      "  name: 'fc6' "
+      "  type: 'InnerProduct' "
+      "  inner_product_param { "
+      "    num_output: 4096 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.005 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 1. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'pool5' "
+      "  top: 'fc6' "
+      "} "
+      "layer { "
+      "  name: 'relu6' "
+      "  type: 'ReLU' "
+      "  bottom: 'fc6' "
+      "  top: 'fc6' "
+      "} "
+      "layer { "
+      "  name: 'drop6' "
+      "  type: 'Dropout' "
+      "  dropout_param { "
+      "    dropout_ratio: 0.5 "
+      "  } "
+      "  bottom: 'fc6' "
+      "  top: 'fc6' "
+      "} "
+      "layer { "
+      "  name: 'fc7' "
+      "  type: 'InnerProduct' "
+      "  inner_product_param { "
+      "    num_output: 4096 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.005 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 1. "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'fc6' "
+      "  top: 'fc7' "
+      "} "
+      "layer { "
+      "  name: 'relu7' "
+      "  type: 'ReLU' "
+      "  bottom: 'fc7' "
+      "  top: 'fc7' "
+      "} "
+      "layer { "
+      "  name: 'drop7' "
+      "  type: 'Dropout' "
+      "  dropout_param { "
+      "    dropout_ratio: 0.5 "
+      "  } "
+      "  bottom: 'fc7' "
+      "  top: 'fc7' "
+      "} "
+      "layer { "
+      "  name: 'fc8' "
+      "  type: 'InnerProduct' "
+      "  inner_product_param { "
+      "    num_output: 1000 "
+      "    weight_filler { "
+      "      type: 'gaussian' "
+      "      std: 0.01 "
+      "    } "
+      "    bias_filler { "
+      "      type: 'constant' "
+      "      value: 0 "
+      "    } "
+      "  } "
+      "  param { "
+      "    lr_mult: 1 "
+      "    decay_mult: 1 "
+      "  } "
+      "  param { "
+      "    lr_mult: 2 "
+      "    decay_mult: 0 "
+      "  } "
+      "  bottom: 'fc7' "
+      "  top: 'fc8' "
+      "} "
+      "layer { "
+      "  name: 'loss' "
+      "  type: 'SoftmaxWithLoss' "
+      "  bottom: 'fc8' "
+      "  bottom: 'label' "
+      "} ";
+  this->RunV1UpgradeTest(expected_v1_proto, expected_v2_proto);
+}  // NOLINT(readability/fn_size)
+
+TEST_F(NetUpgradeTest, TestUpgradeV1LayerType) {
+  LayerParameter layer_param;
+  shared_ptr<Layer<float> > layer;
+  for (int i = 0; i < V1LayerParameter_LayerType_LayerType_ARRAYSIZE; ++i) {
+    ASSERT_TRUE(V1LayerParameter_LayerType_IsValid(i));
+    V1LayerParameter_LayerType v1_type = V1LayerParameter_LayerType(i);
+    string v2_layer_type(UpgradeV1LayerType(v1_type));
+    if (v2_layer_type == "") {
+      EXPECT_EQ(V1LayerParameter_LayerType_NONE, v1_type);
+      continue;  // Empty string isn't actually a valid layer type.
+    }
+    layer_param.set_type(v2_layer_type);
+    // Data layers expect a DB
+    if (v2_layer_type == "Data") {
+      #ifdef USE_LEVELDB
+      string tmp;
+      MakeTempDir(&tmp);
+      boost::scoped_ptr<db::DB> db(db::GetDB(DataParameter_DB_LEVELDB));
+      db->Open(tmp, db::NEW);
+      db->Close();
+      layer_param.mutable_data_param()->set_source(tmp);
+      #else
+      continue;
+      #endif  // USE_LEVELDB
+    }
+    #ifndef USE_OPENCV
+    if (v2_layer_type == "ImageData" || v2_layer_type == "WindowData") {
+     continue;
+    }
+    #endif  // !USE_OPENCV
+    layer = LayerRegistry<float>::CreateLayer(layer_param);
+    EXPECT_EQ(v2_layer_type, layer->type());
+  }
 }
 
-}  // namespace caffe
+class SolverTypeUpgradeTest : public ::testing::Test {
+ protected:
+  void RunSolverTypeUpgradeTest(
+      const string& input_param_string, const string& output_param_string) {
+    // Test upgrading old solver_type field (enum) to new type field (string)
+    SolverParameter input_param;
+    CHECK(google::protobuf::TextFormat::ParseFromString(
+        input_param_string, &input_param));
+    SolverParameter expected_output_param;
+    CHECK(google::protobuf::TextFormat::ParseFromString(
+        output_param_string, &expected_output_param));
+    SolverParameter actual_output_param = input_param;
+    UpgradeSolverType(&actual_output_param);
+    EXPECT_EQ(expected_output_param.DebugString(),
+        actual_output_param.DebugString());
+  }
+};
+
+TEST_F(SolverTypeUpgradeTest, TestSimple) {
+  const char* old_type_vec[6] = { "SGD", "ADAGRAD", "NESTEROV", "RMSPROP",
+      "ADADELTA", "ADAM" };
+  const char* new_type_vec[6] = { "SGD", "AdaGrad", "Nesterov", "RMSProp",
+      "AdaDelta", "Adam" };
+  for (int i = 0; i < 6; ++i) {
+    const string& input_proto =
+        "net: 'examples/mnist/lenet_train_test.prototxt' "
+        "weights: 'examples/mnist/lenet_train_test1.caffemodel' "
+        "weights: 'examples/mnist/lenet_train_test2.caffemodel' "
+        "test_iter: 100 "
+        "test_interval: 500 "
+        "base_lr: 0.01 "
+        "momentum: 0.0 "
+        "weight_decay: 0.0005 "
+        "lr_policy: 'inv' "
+        "gamma: 0.0001 "
+        "power: 0.75 "
+        "display: 100 "
+        "max_iter: 10000 "
+        "snapshot: 5000 "
+        "snapshot_prefix: 'examples/mnist/lenet_rmsprop' "
+        "solver_mode: GPU "
+        "solver_type: " + std::string(old_type_vec[i]) + " ";
+    const string& expected_output_proto =
+        "net: 'examples/mnist/lenet_train_test.prototxt' "
+        "weights: 'examples/mnist/lenet_train_test1.caffemodel' "
+        "weights: 'examples/mnist/lenet_train_test2.caffemodel' "
+        "test_iter: 100 "
+        "test_interval: 500 "
+        "base_lr: 0.01 "
+        "momentum: 0.0 "
+        "weight_decay: 0.0005 "
+        "lr_policy: 'inv' "
+        "gamma: 0.0001 "
+        "power: 0.75 "
+        "display: 100 "
+        "max_iter: 10000 "
+        "snapshot: 5000 "
+        "snapshot_prefix: 'examples/mnist/lenet_rmsprop' "
+        "solver_mode: GPU "
+        "type: '" + std::string(new_type_vec[i]) + "' ";
+    this->RunSolverTypeUpgradeTest(input_proto, expected_output_proto);
+  }
+}
+
+}  // NOLINT(readability/fn_size)  // namespace caffe

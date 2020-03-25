@@ -1,39 +1,52 @@
+dist: trusty
+sudo: required
+
 language: cpp
+compiler: gcc
 
-# Cache Ubuntu apt packages.
-cache: apt
+env:
+  global:
+    - NUM_THREADS=4
+  matrix:
+    # Use a build matrix to test many builds in parallel
+    # envvar defaults:
+    #   WITH_CMAKE: false
+    #   WITH_PYTHON3: false
+    #   WITH_IO: true
+    #   WITH_CUDA: false
+    #   WITH_CUDNN: false
+    - BUILD_NAME="default-make"
+#   - BUILD_NAME="python3-make" WITH_PYTHON3=true
+    - BUILD_NAME="no-io-make" WITH_IO=false
+    - BUILD_NAME="cuda-make" WITH_CUDA=true
+    - BUILD_NAME="cudnn-make" WITH_CUDA=true WITH_CUDNN=true
 
-compiler:
-  - gcc
-# Disable clang build: doesn't seem to work on Linux.
-# (@jeffdonahue: Travis buildbot's failure behavior is similar to what I see
-# building on Linux.)
-#   - clang
+    - BUILD_NAME="default-cmake" WITH_CMAKE=true
+    - BUILD_NAME="python3-cmake" WITH_CMAKE=true WITH_PYTHON3=true
+    - BUILD_NAME="no-io-cmake" WITH_CMAKE=true WITH_IO=false
+    - BUILD_NAME="cuda-cmake" WITH_CMAKE=true WITH_CUDA=true
+    - BUILD_NAME="cudnn-cmake" WITH_CMAKE=true WITH_CUDA=true WITH_CUDNN=true
+
+cache:
+  apt: true
+  directories:
+    - ~/protobuf3
 
 before_install:
-  - echo $LANG
-  - echo $LC_ALL
-  - sudo apt-get -y update
-  - sudo apt-get -y install wget git curl python-dev libprotobuf-dev libleveldb-dev libsnappy-dev libopencv-dev libboost-all-dev libhdf5-serial-dev protobuf-compiler libatlas-dev libatlas-base-dev bc
+  - source ./scripts/travis/defaults.sh
 
 install:
-  - wget https://google-glog.googlecode.com/files/glog-0.3.3.tar.gz -O /tmp/glog-0.3.3.tar.gz && tar -C /tmp -xzvf /tmp/glog-0.3.3.tar.gz && rm /tmp/glog-0.3.3.tar.gz
-  - cd /tmp/glog-0.3.3 && ./configure && make && sudo make install && cd -
-  - curl http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1204/x86_64/cuda-repo-ubuntu1204_6.0-37_amd64.deb -o /tmp/cuda_install.deb && sudo dpkg -i /tmp/cuda_install.deb && rm /tmp/cuda_install.deb
-  - sudo apt-get -y update && sudo apt-get -y install cuda
-  - curl https://gitorious.org/mdb/mdb/archive/7f038d0f15bec57b4c07aa3f31cd5564c88a1897.tar.gz -o /tmp/mdb.tar.gz && tar -C /tmp -xzvf /tmp/mdb.tar.gz && rm /tmp/mdb.tar.gz
-  - cd /tmp/mdb-mdb/libraries/liblmdb/ && make && sudo make install && cd -
+  - sudo -E ./scripts/travis/install-deps.sh
+  - ./scripts/travis/setup-venv.sh ~/venv
+  - source ~/venv/bin/activate
+  - ./scripts/travis/install-python-deps.sh
 
 before_script:
-  - mv Makefile.config.example Makefile.config
-  - export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64:/usr/local/lib
-  - export NUM_THREADS=4
+  - ./scripts/travis/configure.sh
 
 script:
-  - make --keep-going --jobs=$NUM_THREADS all test lint
-  - make --jobs=$NUM_THREADS all
-  - make --jobs=$NUM_THREADS test
-  - make --jobs=$NUM_THREADS lint
+  - ./scripts/travis/build.sh
+  - ./scripts/travis/test.sh
 
 notifications:
 # Emails are sent to the committer's git-configured email address by default,
